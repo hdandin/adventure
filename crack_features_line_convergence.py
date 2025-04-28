@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 import numpy as np
 import gmsh
+from scipy.integrate import quad
 import mechanics_solver as ms
 import function_spaces as fs
 import oneLevelSimplexMesh as sm
@@ -18,6 +19,7 @@ from execTools import Profile
 from integration_domain import Contour
 import interpolation as ip
 import line_integration as li
+import williams
 
 a = 50. # crack length
 R = 10. # contour radius
@@ -526,6 +528,71 @@ class Convergence:
                     delta[i,j] = - bueckner[i,j] * mu / (np.pi*(kappa+1) * (-1)**(n+1) * n * fract.a_n[i])
 
         return bueckner, delta
+    
+    @classmethod
+    def compute_circle_exact_integration(cls):
+        """ Exact integration for a contour with parameter dtheta """
+
+        r = 1.
+        theta = -np.pi, np.pi
+
+        outfile = "results/cvge_circle_ExactInteg"
+        with open(outfile+"_coefs.txt", "w", encoding="utf8") as f:
+            f.write('\nWilliams coefs imposed:\n')
+            f.write('\n'.join(f'n = {x[0]:d}, A_n = {x[1]:.2f}, B_n = {x[2]:.2f}'
+                            for x in zip(cls.n,cls.a_n,cls.b_n)))
+
+        _, mu = fa.lame_constants(cls.E, cls.nu, cls.hyp2d)
+        kappa = fa.kolosov_constant(cls.nu, cls.hyp2d)
+
+        def imposed_stress(n, a_n, b_n, r, theta):
+            sig = np.zeros((2,2))
+            for i, a_i, b_i in zip(n, a_n, b_n):
+                sig += williams.get_stress(i, a_i, b_i, r, theta).reshape((2,2))
+            return sig
+        def imposed_displ(n, a_n, b_n, r, theta, kappa, mu):
+            u = np.zeros(2)
+            for i, a_i, b_i in zip(n, a_n, b_n):
+                u += williams.get_displ(i, a_i, b_i, r, theta, kappa, mu).reshape(2)
+            return u
+        def bueckner_chen(theta, r, kappa, mu, n, a_n, b_n, m, a_m, b_m):
+            """ Brueckner-Chen integrand, theta is a float """
+            sig_1 = imposed_stress(n, a_n, b_n, r, theta)
+            u_1 = imposed_displ(n, a_n, b_n, r, theta, kappa, mu)
+            sig_2 = williams.get_stress(m, a_m, b_m, r, theta).reshape((2,2))
+            u_2 = williams.get_displ(m, a_m, b_m, r, theta, kappa, mu).reshape(2)
+            normal = np.array([np.cos(theta), np.sin(theta)])
+            bueckner = (sig_1.dot(u_2) - sig_2.dot(u_1)).dot(normal)
+            return bueckner
+        
+        result = np.zeros((len(cls.a_n),1))
+        A = np.zeros_like(cls.a_n)
+        B = np.zeros_like(cls.b_n)
+        for i, n in enumerate(cls.n):
+            bueckner_i, _ = quad(bueckner_chen, theta[0], theta[1], 
+                                 args=(r, kappa, mu, cls.n, cls.a_n, cls.b_n, -n, 1., 0.))
+            
+            A[i] = - mu/(kappa + 1) * 1/(np.pi*n*(-1)**(n+1)) * bueckner_i
+            result[i] = A[i]
+            print('n =',n)
+            print('rel error on a_n:', abs(cls.a_n[i] - A[i])/cls.a_n[i])
+
+            bueckner_ii, _ = quad(bueckner_chen, theta[0], theta[1], 
+                                  args=(r, kappa, mu, cls.n, cls.a_n, cls.b_n, -n, 0., 1.))
+            
+            B[i] = - mu/(kappa + 1) * 1/(np.pi*n*(-1)**(n+1)) * bueckner_ii
+            print('abs error on b_n:', abs(cls.b_n[i] - B[i]))
+
+        # save results
+        np.savez(outfile+".npz", element_lengths=[0], orders=cls.n, a_known=cls.a_n, a_computed=result)
+        
+        with open(outfile+"_coefs.txt", "a", encoding="utf8") as f:
+            f.write('\nWilliams coefs computed:\n')
+            f.write('\n'.join(f'n = {x[0]:d}, A_n = {x[1]:.2f}, B_n = {x[2]:.2f}'
+                                for x in zip(cls.n, A, B)))
+            f.write('\n')
+            f.write('\n'.join(f'n = {x[0]:d}, |A_imp-A_comp| = {abs(x[1]-x[2]):.6e}'
+                                for x in zip(cls.n, cls.a_n, A)))
 
 if __name__ == "__main__":
 
@@ -540,15 +607,16 @@ if __name__ == "__main__":
     cvg.print_mesh_specs()
 
     ## integration error
+    cvg.compute_circle_exact_integration()
     cvg.loop_over_meshes(ip.UInterpolatorNone, ip.StressInterpolatorNone, "Exact", IntegError)
     pt.plot_cvge_relerror_log("IntegError_IntegExact")
     cvg.loop_over_meshes(ip.UInterpolatorNone, ip.StressInterpolatorNone, "Exact", IntegError,
                          cvge_analysis=False, ortho_analysis=True)
 
-    cvg.loop_over_meshes(ip.UInterpolatorNone, ip.StressInterpolatorNone, "Rect", IntegError)
-    pt.plot_cvge_relerror_log("IntegError_IntegRect")
-    cvg.loop_over_meshes(ip.UInterpolatorNone, ip.StressInterpolatorNone, "Rect", IntegError,
-                         cvge_analysis=False, ortho_analysis=True)
+    # cvg.loop_over_meshes(ip.UInterpolatorNone, ip.StressInterpolatorNone, "Rect", IntegError)
+    # pt.plot_cvge_relerror_log("IntegError_IntegRect")
+    # cvg.loop_over_meshes(ip.UInterpolatorNone, ip.StressInterpolatorNone, "Rect", IntegError,
+    #                      cvge_analysis=False, ortho_analysis=True)
 
     
     ## stress interpolation error
